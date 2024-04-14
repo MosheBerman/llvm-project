@@ -125,6 +125,11 @@ New checks
   Finds initializer lists for aggregate types that could be
   written as designated initializers instead.
 
+- New :doc:`objc-nullability-annotator
+  <clang-tidy/checks/objc/nullability-annotator>` check.
+
+  FIXME: add release notes.
+
 - New :doc:`readability-enum-initial-value
   <clang-tidy/checks/readability/enum-initial-value>` check.
 

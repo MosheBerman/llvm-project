@@ -16,6 +16,7 @@
 #include "MissingHashCheck.h"
 #include "NSDateFormatterCheck.h"
 #include "NSInvocationArgumentLifetimeCheck.h"
+#include "NullabilityAnnotatorCheck.h"
 #include "PropertyDeclarationCheck.h"
 #include "SuperSelfCheck.h"
 
@@ -40,6 +41,8 @@ public:
     CheckFactories.registerCheck<NSDateFormatterCheck>("objc-nsdate-formatter");
     CheckFactories.registerCheck<NSInvocationArgumentLifetimeCheck>(
         "objc-nsinvocation-argument-lifetime");
+    CheckFactories.registerCheck<NullabilityAnnotatorCheck>(
+        "objc-nullability-annotator");
     CheckFactories.registerCheck<PropertyDeclarationCheck>(
         "objc-property-declaration");
     CheckFactories.registerCheck<SuperSelfCheck>(
