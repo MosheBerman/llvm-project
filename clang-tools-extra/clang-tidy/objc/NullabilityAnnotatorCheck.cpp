@@ -8,6 +8,7 @@
 
 #include "NullabilityAnnotatorCheck.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/Analysis/CFG.h"
 
 using namespace clang::ast_matchers;
 
@@ -15,7 +16,18 @@ namespace clang::tidy::objc {
 
 void NullabilityAnnotatorCheck::registerMatchers(MatchFinder *Finder) {
   // FIXME: Add matchers.
-  Finder->addMatcher(functionDecl().bind("x"), this);
+
+  // Finder->addMatcher(
+    // objCMethodDecl(
+    //   hasDescendant(
+    //     returnStmt(
+    //       hasReturnValue(
+    //         any(
+    //           cxxNullPtrLiteralExpr(),
+    //           // See: https://nshipster.com/nil/
+    //           functionDecl(hasDescendant(returnStmt(hasDescendant(castExpr(hasCastKind("CK_NullToPointer"))))))
+    //         )
+    //       ))))).bind("x"), this);
 }
 
 void NullabilityAnnotatorCheck::check(const MatchFinder::MatchResult &Result) {
