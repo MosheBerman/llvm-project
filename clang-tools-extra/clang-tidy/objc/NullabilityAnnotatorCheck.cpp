@@ -12,6 +12,7 @@
 #include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/ExprObjC.h"
+#include "clang/AST/GlobalDecl.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
@@ -51,9 +52,18 @@ public:
 };
 
 void NullabilityAnnotatorCheck::registerMatchers(MatchFinder *Finder) {
-
+  // Method decls
   Finder->addMatcher(objcMethodDecl().bind("omd"), this);
+
+  // Function decls
   Finder->addMatcher(functionDecl().bind("fd"), this);
+
+  // Property Decls
+  Finder->addMatcher(objcPropertyDecl().bind("opd"), this);
+
+  // Global variables
+  Finder->addMatcher(
+      varDecl(allOf(hasGlobalStorage(), isConstQualified())).bind("gvd"), this);
 }
 
 bool isExprNilOrZeroLiteral(const Expr *E) {
@@ -82,6 +92,8 @@ NullabilityKind getNullabilityOfReturnStmt(ReturnStmt *RS, ASTContext &Ctx) {
   if (RV) {
     RV = RV->IgnoreCasts();
   }
+
+  // TODO: Are there other non-null literals to account for?
   bool IsStringLiteral = dyn_cast_or_null<ObjCStringLiteral>(RV);
 
   if (isExprNilOrZeroLiteral(RV)) {
@@ -141,17 +153,11 @@ void NullabilityAnnotatorCheck::check(const MatchFinder::MatchResult &Result) {
   } else if (OMD != nullptr) {
     Visitor.TraverseObjCMethodDecl(const_cast<ObjCMethodDecl *>(OMD));
     Name = OMD->getNameAsString();
-    // OMD->dumpColor();
   }
   NullabilityKind WeakestNullability =
       getWeakestNullabilityForReturnStatements(Visitor, Result.Context);
   llvm::outs() << "WeakestNullability of " << Name << " is "
                << getNullabilitySpelling(WeakestNullability, true) << "\n";
-  // for (ReturnStmt *RS : Visitor.getVisited()) {
-  //   NullabilityKind NK = getNullabilityOfReturnStmt(RS, *Result.Context);
-  //   llvm::outs() << "" << Name << " contains a return stmt that is "
-  //                << getNullabilitySpelling(NK, true) << "\n";
-  // }
 }
 
 } // namespace clang::tidy::objc
