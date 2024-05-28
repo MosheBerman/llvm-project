@@ -5,7 +5,6 @@
 
 // CHECK-MESSAGES: :[[@LINE-1]]:6: warning: function 'f' is insufficiently awesome [objc-nullability-annotator]
 
-
 @interface NSObject
 + (instancetype)alloc;
 - (instancetype)init;
@@ -18,23 +17,24 @@
 #define nil (id)0
 #define NULL (void *)0
 
+
 // A freestanding function that returns a string literal.
-NSString *_Nonnull annotatedFreestandingReturnsStringLiteral() {
+NSString *_Nonnull annotatedFreestandingReturnsStringLiteral(void) {
   return @"I am a string.";
 }
 
 // A freestanding function that returns a `nil` literal.
-NSString *_Nullable annotatedReturnsNilLiteral() {
+NSString *_Nullable annotatedReturnsNilLiteral(void) {
   return nil;
 }
 
 // CHECK: NSString *_Nonnull unannotatedFunctionReturnsStringLiteral() {
-NSString * unannotatedFunctionReturnsStringLiteral() {
+NSString * unannotatedFunctionReturnsStringLiteral(void) {
   return @"I am a string, too.";
 }
 
 // CHECK: NSString *_Nullable unannotatedFunctionReturnsNilLiteral() {
-NSString * unannotatedFunctionReturnsNilLiteral() {
+NSString * unannotatedFunctionReturnsNilLiteral(void) {
   return nil;
 }
 
@@ -46,18 +46,15 @@ NSString * unannotatedFunctionReturnsNilLiteral() {
 
 // CHECK: - (void)noReturn;
 - (void)noReturn;
+// CHECK: - (void)voidReturn;
+- (void)voidReturn;
 
 // CHECK: - (NSObject *_Nullable)returnsNULLLiteralObjectPointer;
 - (NSObject *)returnsNULLLiteralObjectPointer;
 // CHECK: - (NSObject *_Nullable)returnsNilLiteralObjectPointer;
 - (NSObject *)returnsNilLiteralObjectPointer;
-// CHECK: - (NSObject *_Nullable)returnsNullPtrObjectPointer;
-- (NSObject *)returnsNullPtrObjectPointer;
-
 // CHECK: - (id _Nullable)returnsNilLiteralIDType;
 - (id)returnsNilLiteralIDType;
-// CHECK: - (id _Nullable)returnsNullPtrIDType;
-- (id)returnsNullPtrIDType;
 // CHECK: - (id _Nullable)returnsNULLLiteralIDType;
 - (id)returnsNULLLiteralIDType;
 // CHECK: - (instancetype _Nullable)returnsNilLiteralInstanceType;
@@ -79,6 +76,77 @@ NSString * unannotatedFunctionReturnsNilLiteral() {
 // Branching logic
 // CHECK: - (NSString * _Nullable)maybeNilMaybeNot;
 - (NSString *)maybeNilMaybeNot;
+@end
+
+@implementation ClassWithoutAnnotations
+
+// Single-branch methods, without arguments
+- (instancetype)init {
+return [super init];
+}
+
++ (id)init {
+  [super init];
+}
+
+// CHECK: - (void)noReturn;
+- (void)noReturn{}
+
+- (void)voidReturn{
+  return;
+}
+
+// CHECK: - (NSObject *_Nullable)returnsNULLLiteralObjectPointer;
+- (NSObject *)returnsNULLLiteralObjectPointer {
+  return NULL;
+}
+// CHECK: - (NSObject *_Nullable)returnsNilLiteralObjectPointer;
+- (NSObject *)returnsNilLiteralObjectPointer {
+  return nil;
+}
+
+// CHECK: - (id _Nullable)returnsNilLiteralIDType;
+- (id)returnsNilLiteralIDType {
+  return nil;
+}
+// CHECK: - (id _Nullable)returnsNULLLiteralIDType;
+- (id)returnsNULLLiteralIDType {
+  return NULL;
+}
+
+// CHECK: - (instancetype _Nullable)returnsNilLiteralInstanceType;
+- (instancetype)returnsNilLiteralInstanceType {
+  return nil;
+}
+
+// CHECK: - (NSString *_Nonnull)returnsLiteralString;
+- (NSString *)returnsLiteralString {
+  return nil;
+}
+
+// Class methods, too.
+
+// CHECK: + (instancetype _Nullable)returnsNilLiteralInstanceTypeClassMethod;
++ (instancetype)returnsNilLiteralInstanceTypeClassMethod {
+  return nil;
+}
+// CHECK: + (id _Nullable)returnsNilLiteralInstanceTypeClassMethod;
++ (id)returnsNilLiteralIdTypeClassMethod {
+  return nil;
+}
+// + (NSString *_Nonnull)returnsStringLiteralClassMethod;
++ (NSString *)returnsStringLiteralClassMethod {
+  return @"I am a string literal";
+}
+
+// Branching logic
+// CHECK: - (NSString * _Nullable)maybeNilMaybeNot;
+- (NSString *)maybeNilMaybeNot {
+  if (1) {
+    return @"I am a string literal.";
+  } 
+  return nil;
+}
 @end
 
 // Covers cases where annotated arguments or annotated methods contribute to
@@ -111,8 +179,8 @@ NSString * unannotatedFunctionReturnsNilLiteral() {
 
 @end 
 
-id _Nullable returnsEmpty(int kind) {
-  switch (kind) {
+id _Nullable returnsEmpty(int Kind) {
+  switch (Kind) {
     case 0:
       // NULL
       return 	(void *)0;
