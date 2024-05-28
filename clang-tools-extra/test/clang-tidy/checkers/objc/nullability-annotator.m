@@ -17,7 +17,6 @@
 #define nil (id)0
 #define NULL (void *)0
 
-
 // A freestanding function that returns a string literal.
 NSString *_Nonnull annotatedFreestandingReturnsStringLiteral(void) {
   return @"I am a string.";
@@ -53,10 +52,10 @@ NSString * unannotatedFunctionReturnsNilLiteral(void) {
 - (NSObject *)returnsNULLLiteralObjectPointer;
 // CHECK: - (NSObject *_Nullable)returnsNilLiteralObjectPointer;
 - (NSObject *)returnsNilLiteralObjectPointer;
-// CHECK: - (id _Nullable)returnsNilLiteralIDType;
-- (id)returnsNilLiteralIDType;
-// CHECK: - (id _Nullable)returnsNULLLiteralIDType;
-- (id)returnsNULLLiteralIDType;
+// CHECK: - (id _Nullable)returnsNilLiteralIdType;
+- (id)returnsNilLiteralIdType;
+// CHECK: - (id _Nullable)returnsNULLLiteralIdType;
+- (id)returnsNULLLiteralIdType;
 // CHECK: - (instancetype _Nullable)returnsNilLiteralInstanceType;
 - (instancetype)returnsNilLiteralInstanceType;
 // CHECK: - (id _Nullable)returnsNilLiteralInstanceType;
@@ -86,7 +85,7 @@ return [super init];
 }
 
 + (id)init {
-  [super init];
+  return [super init];
 }
 
 // CHECK: - (void)noReturn;
@@ -105,12 +104,12 @@ return [super init];
   return nil;
 }
 
-// CHECK: - (id _Nullable)returnsNilLiteralIDType;
-- (id)returnsNilLiteralIDType {
+// CHECK: - (id _Nullable)returnsNilLiteralIdType;
+- (id)returnsNilLiteralIdType {
   return nil;
 }
-// CHECK: - (id _Nullable)returnsNULLLiteralIDType;
-- (id)returnsNULLLiteralIDType {
+// CHECK: - (id _Nullable)returnsNULLLiteralIdType;
+- (id)returnsNULLLiteralIdType {
   return NULL;
 }
 
@@ -157,12 +156,12 @@ return [super init];
 // Return types and arguments. Simple case where an argument is treated as nullable.
 // CHECK: - (NSString *_Nullable)returnsNullableStringArgumentDirectly:(NSString * _Nullable)argument;
 - (NSString *)returnsNullableStringArgumentDirectly:(NSString * _Nullable)argument;
-// CHECK: - (id _Nullable)returnsNullableIDTypeArgumentDirectly:(id _Nullable)argument;
-- (id)returnsNullableIDTypeArgumentDirectly:(id _Nullable)argument;
+// CHECK: - (id _Nullable)returnsNullableIdTypeArgumentDirectly:(id _Nullable)argument;
+- (id)returnsNullableIdTypeArgumentDirectly:(id _Nullable)argument;
 // CHECK: - (NSString *_Nonnull)returnsNonnullStringArgumentDirectly:(NSString * _Nonnull)argument;
 - (NSString *)returnsNonnullStringArgumentDirectly:(NSString * _Nonnull)argument;
-// CHECK: - (id _Nonnull)returnsNonnullIDTypeArgumentDirectly:(id _Nonnull)argument;
-- (id)returnsNonnullIDTypeArgumentDirectly:(id _Nonnull)argument;
+// CHECK: - (id _Nonnull)returnsNonnullIdTypeArgumentDirectly:(id _Nonnull)argument;
+- (id)returnsNonnullIdTypeArgumentDirectly:(id _Nonnull)argument;
 
 // CHECK: - (NSString *)callsNullableFunction;
 - (NSString *)callsNullableFunction;
@@ -178,6 +177,63 @@ return [super init];
 - (nullable NSString *)annotatedNullableWithSugar;
 
 @end 
+
+
+// Covers cases where annotated arguments or annotated methods contribute to
+// the annotation correctness of another method, property, or argument in a 
+// the class.
+@implementation  ClassWithMissingAnnotations
+
+// Return types and arguments. Simple case where an argument is treated as nullable.
+// CHECK: - (NSString *_Nullable)returnsNullableStringArgumentDirectly:(NSString * _Nullable)argument;
+- (NSString *)returnsNullableStringArgumentDirectly:(NSString * _Nullable)argument {
+  return nil;
+}
+
+// CHECK: - (id _Nullable)returnsNullableIdTypeArgumentDirectly:(id _Nullable)argument;
+- (id)returnsNullableIdTypeArgumentDirectly:(id _Nullable)argument {
+  return nil;
+}
+// CHECK: - (NSString *_Nonnull)returnsNonnullStringArgumentDirectly:(NSString * _Nonnull)argument;
+- (NSString *)returnsNonnullStringArgumentDirectly:(NSString * _Nonnull)argument {
+  return @"I am literally a string.";
+}
+
+// CHECK: - (id _Nonnull)returnsNonnullIdTypeArgumentDirectly:(id _Nonnull)argument;
+- (id)returnsNonnullIdTypeArgumentDirectly:(id _Nonnull)argument {
+  return argument;
+}
+
+// CHECK: - (NSString *)callsNullableFunction;
+- (NSString *)callsNullableFunction {
+  return annotatedReturnsNilLiteral();
+}
+// CHECK: - (NSString *)callsNonnullFunction;
+- (NSString *)callsNonnullFunction {
+  return annotatedFreestandingReturnsStringLiteral()
+}
+// CHECK: - (NSString *_Nonnull)annotatedNonnull; 
+- (NSString *_Nonnull)annotatedNonnull {
+  return @"I'm also a string.";
+}
+
+// CHECK: - (NSString *_Nullable)annotatedNullable;
+- (NSString *_Nullable)annotatedNullable {
+  return nil;
+}
+
+// CHECK: - (nonnull NSString *)annotatedNonnullWithSugar;
+- (nonnull NSString *)annotatedNonnullWithSugar {
+  return @"I am string with a sweet tooth. I like syntax-sugar.";
+}
+
+// CHECK: - (nullable NSString *)annotatedNullableWithSugar;
+- (nullable NSString *)annotatedNullableWithSugar {
+  return nil;
+}
+
+@end 
+
 
 id _Nullable returnsEmpty(int Kind) {
   switch (Kind) {
