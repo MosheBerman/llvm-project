@@ -197,12 +197,12 @@ getWeakestNullabilityForReturnStatements(ReturnStatementCollector Visitor,
                                          ASTContext *Ctx) {
 
   std::vector<ReturnStmt *> ReturnStatements = Visitor.getVisited();
-  NullabilityKind NK = NullabilityKind::NonNull;
 
   // Return unspecified if no return statements were found by the visitor.
   if (ReturnStatements.empty()) {
     return std::nullopt;
   }
+  NullabilityKind NK = NullabilityKind::NonNull;
   for (ReturnStmt *RS : ReturnStatements) {
     NullabilityKind NRS = getNullabilityOfReturnStmt(RS, *Ctx);
     if (hasWeakerNullability(NRS, NK)) {
