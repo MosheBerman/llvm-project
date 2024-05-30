@@ -8,27 +8,57 @@
 
 #include "NullabilityAnnotatorCheck.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ComputeDependence.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/GlobalDecl.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
+#include "clang/AST/Type.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
+#include "clang/Basic/DiagnosticSema.h"
 #include "clang/Basic/Specifiers.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/raw_ostream.h"
 #include <iterator>
-#include <memory>
-#include <stdexcept>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using namespace clang::ast_matchers;
 
 namespace clang::tidy::objc {
+
+const Expr *getInnermostExpr(Expr *Exp) {
+  const clang::Expr *E = Exp;
+  E = E->IgnoreCasts()->IgnoreImpCasts();
+
+  if (const ExprWithCleanups *EWCU = dyn_cast<ExprWithCleanups>(E)) {
+    llvm::errs() << "Is cleanup expr."
+                 << "\n";
+    E = EWCU->getSubExpr();
+  }
+
+  if (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E)) {
+    E = getInnermostExpr(const_cast<Expr *>(E->IgnoreImpCasts()));
+  }
+
+  if (const MaterializeTemporaryExpr *M = dyn_cast<MaterializeTemporaryExpr>(E))
+    E = M->getSubExpr();
+
+  while (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E))
+    E = ICE->getSubExprAsWritten();
+
+  return E;
+}
 
 /// Collects return statements to find how "nullable" they are.
 class ReturnStatementCollector
@@ -53,54 +83,105 @@ public:
 
 void NullabilityAnnotatorCheck::registerMatchers(MatchFinder *Finder) {
   // Method decls
-  Finder->addMatcher(objcMethodDecl().bind("omd"), this);
+  Finder->addMatcher(
+      traverse(TK_IgnoreUnlessSpelledInSource, objcMethodDecl().bind("omd")),
+      this);
 
   // Function decls
-  Finder->addMatcher(functionDecl().bind("fd"), this);
+  Finder->addMatcher(
+      traverse(TK_IgnoreUnlessSpelledInSource, functionDecl().bind("fd")),
+      this);
 
   // Property Decls
-  Finder->addMatcher(objcPropertyDecl().bind("opd"), this);
+  Finder->addMatcher(
+      traverse(TK_IgnoreUnlessSpelledInSource, objcPropertyDecl().bind("opd")),
+      this);
 
   // Global variables
-  Finder->addMatcher(
-      varDecl(allOf(hasGlobalStorage(), isConstQualified())).bind("gvd"), this);
+  // Finder->addMatcher(.bind("gvd"), this);
 }
 
-bool isExprNilOrZeroLiteral(const Expr *E) {
+bool isSomeKindOfNil(const Expr *E, ASTContext *C) {
   if (!E) {
     return false;
   }
   // Zero literal
-  if (const auto *const IL = dyn_cast_or_null<IntegerLiteral>(E)) {
-    return IL->getValue() == 0;
-  }
+  const auto *const IL = dyn_cast_or_null<IntegerLiteral>(E);
+  const auto NullPtrConstKind =
+      E->isNullPointerConstant(*C, Expr::NullPointerConstantValueDependence());
+
   // nil/null/nullptr/NULL
   // See: https://nshipster.com/nil/
-  return isa<GNUNullExpr>(E) || isa<CXXNullPtrLiteralExpr>(E);
+  return (NullPtrConstKind !=
+          Expr::NullPointerConstantKind::NPCK_NotNull) /* Pointer is not
+                                        nonnull, then it's some form of
+                                        nil/null
+                                      */
+         || (IL && IL->getValue() == 0)                /* Zero literal */
+         || isa<GNUNullExpr>(E)                        /* __null */
+         || isa<CXXNullPtrLiteralExpr>(E) /* nullptr */;
 }
 
 /// Determine if a return statement's value is `nil`, nullable, or a nonnull
 /// value.
 NullabilityKind getNullabilityOfReturnStmt(ReturnStmt *RS, ASTContext &Ctx) {
   if (!RS) {
-    llvm::errs() << "Return statement is null.";
+    llvm::errs()
+        << "`getNullabilityOfReturnStmt` expected a `ReturnStmt` pointer. "
+           "Instead, got `nullptr`.";
     return NullabilityKind::Unspecified;
   }
+
   Expr *RV = RS->getRetValue();
 
-  // Remove implicit casts.
-  if (RV) {
-    RV = RV->IgnoreCasts();
+  if (!RV) {
+    // Return statements are allowed in void methods.
+    return NullabilityKind::Unspecified;
   }
 
-  // TODO: Are there other non-null literals to account for?
-  bool IsStringLiteral = dyn_cast_or_null<ObjCStringLiteral>(RV);
+  Expr *RVIgnoringCasts = const_cast<Expr *>(getInnermostExpr(RV));
 
-  if (isExprNilOrZeroLiteral(RV)) {
+  // Void functions/methods without a return stmt.
+  // base case: return `nil` literal
+  // https://stackoverflow.com/a/38194354
+  if ((RVIgnoringCasts && isSomeKindOfNil(RVIgnoringCasts, &Ctx)) ||
+      isSomeKindOfNil(RV, &Ctx)) {
     return NullabilityKind::Nullable;
   }
-  if (IsStringLiteral) {
+
+  // base case: return string literal
+  if (isa<ObjCStringLiteral>(RV) || isa<ObjCStringLiteral>(RVIgnoringCasts)) {
     return NullabilityKind::NonNull;
+  }
+
+  // If the return statement makes a call, check nullability of the call.
+  ObjCMessageExpr *const OME =
+      dyn_cast_or_null<ObjCMessageExpr>(RVIgnoringCasts);
+  if (OME) {
+    QualType MsgRetType = OME->getCallReturnType(Ctx);
+    std::optional<NullabilityKind> NK = MsgRetType->getNullability();
+    if (NK) {
+      return *NK;
+    }
+  }
+
+  DeclRefExpr *const DRE = dyn_cast_or_null<DeclRefExpr>(RVIgnoringCasts);
+  if (DRE) {
+    QualType QT = DRE->getType();
+    std::optional<NullabilityKind> NK = QT->getNullability();
+    if (NK) {
+      return *NK;
+    }
+  }
+
+  // If the return statement makes a call, check nullability of the call.
+  CallExpr *const CE = dyn_cast_or_null<CallExpr>(RVIgnoringCasts);
+  if (CE) {
+    QualType QT = CE->getCallReturnType(Ctx);
+    std::optional<NullabilityKind> NK = QT->getNullability();
+    if (NK) {
+      return *NK;
+    }
   }
   return NullabilityKind::Unspecified;
 }
@@ -111,7 +192,7 @@ NullabilityKind getNullabilityOfReturnStmt(ReturnStmt *RS, ASTContext &Ctx) {
 /// could have also assumed weakest and checked for "greater" nullability, but
 /// `hasWeakerNullability` was already defined in `Specifiers.h` when I found
 /// this.
-NullabilityKind
+std::optional<NullabilityKind>
 getWeakestNullabilityForReturnStatements(ReturnStatementCollector Visitor,
                                          ASTContext *Ctx) {
 
@@ -120,8 +201,7 @@ getWeakestNullabilityForReturnStatements(ReturnStatementCollector Visitor,
 
   // Return unspecified if no return statements were found by the visitor.
   if (ReturnStatements.empty()) {
-    NK = NullabilityKind::Unspecified;
-    return NK;
+    return std::nullopt;
   }
   for (ReturnStmt *RS : ReturnStatements) {
     NullabilityKind NRS = getNullabilityOfReturnStmt(RS, *Ctx);
@@ -136,28 +216,30 @@ getWeakestNullabilityForReturnStatements(ReturnStatementCollector Visitor,
 ///
 /// The first pass deduces nullability of functions and methods, by examining
 /// the return statements of each one, and finding weakest annotation.
-///
-/// Functions and Methods:
-///
-
 void NullabilityAnnotatorCheck::check(const MatchFinder::MatchResult &Result) {
   ReturnStatementCollector Visitor;
 
   const FunctionDecl *FD = Result.Nodes.getNodeAs<FunctionDecl>("fd");
   const ObjCMethodDecl *OMD = Result.Nodes.getNodeAs<ObjCMethodDecl>("omd");
+
   std::string Name = "<unnamed>";
 
   if (FD != nullptr) {
     Visitor.TraverseFunctionDecl(const_cast<FunctionDecl *>(FD));
-    Name = FD->getNameAsString();
+    Name = FD->getQualifiedNameAsString();
   } else if (OMD != nullptr) {
     Visitor.TraverseObjCMethodDecl(const_cast<ObjCMethodDecl *>(OMD));
-    Name = OMD->getNameAsString();
+    Name = OMD->getQualifiedNameAsString();
   }
-  NullabilityKind WeakestNullability =
+  std::optional<NullabilityKind> WeakestNullability =
       getWeakestNullabilityForReturnStatements(Visitor, Result.Context);
-  llvm::outs() << "WeakestNullability of " << Name << " is "
-               << getNullabilitySpelling(WeakestNullability, true) << "\n";
+  if (WeakestNullability) {
+    llvm::errs() << "WeakestNullability of " << Name << " is "
+                 << getNullabilitySpelling(*WeakestNullability, true) << "\n";
+  } else {
+    llvm::errs() << "" << Name << " has no return stmts."
+                 << "\n";
+  }
 }
 
 } // namespace clang::tidy::objc
