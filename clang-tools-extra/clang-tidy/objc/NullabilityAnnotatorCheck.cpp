@@ -8,6 +8,7 @@
 
 #include "NullabilityAnnotatorCheck.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/ComputeDependence.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
@@ -24,6 +25,7 @@
 #include "clang/Basic/DiagnosticSema.h"
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/MC/MCInstrDesc.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
@@ -98,6 +100,12 @@ void NullabilityAnnotatorCheck::registerMatchers(MatchFinder *Finder) {
       this);
 
   // Global variables
+  Finder->addMatcher(varDecl(unless(anyOf(hasAncestor(functionDecl()),
+                                          hasAncestor(objcMethodDecl()))))
+                         .bind("vd"),
+                     this);
+
+  // Global variables
   // Finder->addMatcher(.bind("gvd"), this);
 }
 
@@ -165,6 +173,8 @@ NullabilityKind getNullabilityOfReturnStmt(ReturnStmt *RS, ASTContext &Ctx) {
     }
   }
 
+  // If the return statement references a decl, such as a parameter or property,
+  // we check its nullability here.
   DeclRefExpr *const DRE = dyn_cast_or_null<DeclRefExpr>(RVIgnoringCasts);
   if (DRE) {
     QualType QT = DRE->getType();
@@ -183,20 +193,26 @@ NullabilityKind getNullabilityOfReturnStmt(ReturnStmt *RS, ASTContext &Ctx) {
       return *NK;
     }
   }
+
+  // If we reach this point, we expect to find no nullability. Since the return
+  // of this function is itself not optional, we fall back to unspecified.
+  //
+  // This is not unlike a human reviewer who may use an explicit unspecified
+  // annotation to note that this particular pointer needs further review.
   return NullabilityKind::Unspecified;
 }
 
-/// Given a set of return statements, find the weakest nullability between all
-/// of them.
+/// Given a `ReturnStatementCollector`, find the weakest nullability between all
+/// of the return statements that it has collected. These return statements may
+/// come from a single function, method, or multiple redclarations of the same
+/// one.
+///
 /// Assume "strongest" nullability, unless the are no return statements. We
 /// could have also assumed weakest and checked for "greater" nullability, but
 /// `hasWeakerNullability` was already defined in `Specifiers.h` when I found
 /// this.
-std::optional<NullabilityKind>
-getWeakestNullabilityForReturnStatements(ReturnStatementCollector Visitor,
-                                         ASTContext *Ctx) {
-
-  std::vector<ReturnStmt *> ReturnStatements = Visitor.getVisited();
+std::optional<NullabilityKind> getWeakestNullabilityForReturnStatements(
+    std::vector<ReturnStmt *> ReturnStatements, ASTContext *Ctx) {
 
   // Return unspecified if no return statements were found by the visitor.
   if (ReturnStatements.empty()) {
@@ -212,33 +228,119 @@ getWeakestNullabilityForReturnStatements(ReturnStatementCollector Visitor,
   return NK;
 }
 
+template <typename T>
+std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
+  ReturnStatementCollector Visitor;
+  std::string Name = DeclOfType->getQualifiedNameAsString();
+  bool HasBody = DeclOfType->hasBody();
+  bool IsCanonical = DeclOfType->isCanonicalDecl();
+
+  if (!HasBody) {
+    // Find all redecls and get weakest return across all of them.
+    // This addresses the functions prototypes with multiple implementations,
+    // by making the prototype follow the weakest nullability across all
+    // implementations.
+    for (const auto R : DeclOfType->redecls()) {
+      Visitor.TraverseDecl(R);
+    }
+  } else if (IsCanonical) {
+    // Only visit a function with a body if it has no prototype.
+    // Otherwise we'll cover it twice, given the above branch.
+    Visitor.TraverseDecl(DeclOfType);
+  }
+  return Visitor.getVisited();
+}
+
 /// This check deduces nullability of pointers.
 ///
 /// The first pass deduces nullability of functions and methods, by examining
 /// the return statements of each one, and finding weakest annotation.
+///
+/// To handle interfaces and redeclarations, we will want to find the canonical
+/// declaration, and then find all redeclerations in the translation unit.
 void NullabilityAnnotatorCheck::check(const MatchFinder::MatchResult &Result) {
   ReturnStatementCollector Visitor;
 
+  const VarDecl *VD = Result.Nodes.getNodeAs<VarDecl>("vd");
   const FunctionDecl *FD = Result.Nodes.getNodeAs<FunctionDecl>("fd");
   const ObjCMethodDecl *OMD = Result.Nodes.getNodeAs<ObjCMethodDecl>("omd");
+  std::vector<ReturnStmt *> ReturnStatements;
 
   std::string Name = "<unnamed>";
+  bool HasBody = false;
+  bool IsCanonical = false;
 
-  if (FD != nullptr) {
-    Visitor.TraverseFunctionDecl(const_cast<FunctionDecl *>(FD));
-    Name = FD->getQualifiedNameAsString();
-  } else if (OMD != nullptr) {
-    Visitor.TraverseObjCMethodDecl(const_cast<ObjCMethodDecl *>(OMD));
-    Name = OMD->getQualifiedNameAsString();
-  }
-  std::optional<NullabilityKind> WeakestNullability =
-      getWeakestNullabilityForReturnStatements(Visitor, Result.Context);
-  if (WeakestNullability) {
-    llvm::errs() << "WeakestNullability of " << Name << " is "
-                 << getNullabilitySpelling(*WeakestNullability, true) << "\n";
-  } else {
-    llvm::errs() << "" << Name << " has no return stmts."
+  if (VD != nullptr) {
+    llvm::errs() << "Found global variable: " << VD->getQualifiedNameAsString()
                  << "\n";
+  } else if (FD != nullptr) {
+    Name = FD->getQualifiedNameAsString();
+    // HasBody = FD->hasBody();
+    // IsCanonical = FD->isCanonicalDecl();
+
+    // if (!HasBody) {
+    //   // Find all redecls and get weakest return across all of them.
+    //   // This addresses the functions prototypes with multiple
+    //   implementations,
+    //   // by making the prototype follow the weakest nullability across all
+    //   // implementations.
+    //   for (auto *const R : FD->redecls()) {
+    //     Visitor.TraverseFunctionDecl(const_cast<FunctionDecl *>(R));
+    //   }
+    // } else if (IsCanonical) {
+    //   // Only visit a function with a body if it has no prototype.
+    //   // Otherwise we'll cover it twice, given the above branch.
+    //   Visitor.TraverseFunctionDecl(const_cast<FunctionDecl *>(FD));
+    // }
+
+    ReturnStatements = returnStatementsForCanonicalDecl<FunctionDecl *>(
+        const_cast<FunctionDecl *>(FD));
+
+  } else if (OMD != nullptr) {
+    Name = OMD->getQualifiedNameAsString();
+    // HasBody = OMD->hasBody();
+    // IsCanonical = OMD->isCanonicalDecl();
+
+    // if (!HasBody) {
+    //   // Find all redecls and get weakest return across all of them.
+    //   // This addresses the question of an Obj-C protocol with multiple
+    //   // implementations, by making the protocol follow the weakest
+    //   nullability
+    //   // across all implementations.
+    //   for (auto *const R : OMD->redecls()) {
+    //     Visitor.TraverseObjCMethodDecl(dyn_cast<ObjCMethodDecl>(R));
+    //   }
+    // } else if (IsCanonical) {
+    //   // Only visit a method with a body if it has no prototype.
+    //   // Otherwise we'll cover it twice, given the above branch.
+    //   Visitor.TraverseObjCMethodDecl(const_cast<ObjCMethodDecl *>(OMD));
+    // }
+    ReturnStatements = returnStatementsForCanonicalDecl<ObjCMethodDecl *>(
+        const_cast<ObjCMethodDecl *>(OMD));
+  }
+
+  // By this point, we've collected return statements for all of the
+  // implementations of a given canonical decleration. We can now find the
+  // weakest nullability and resolve the return type for the decl and its
+  // redeclarations.
+  if (FD != nullptr || OMD != nullptr) {
+    if (!HasBody && IsCanonical) {
+      llvm::errs() << "Found prototype for " << Name << "."
+                   << "\n";
+    } else {
+
+      std::optional<NullabilityKind> WeakestNullability =
+          getWeakestNullabilityForReturnStatements(ReturnStatements,
+                                                   Result.Context);
+      if (WeakestNullability) {
+        llvm::errs() << "WeakestNullability of " << Name << " is "
+                     << getNullabilitySpelling(*WeakestNullability, true)
+                     << "\n";
+      } else if (HasBody) {
+        llvm::errs() << "" << Name << " has no return stmts."
+                     << "\n";
+      }
+    }
   }
 }
 
