@@ -1,4 +1,4 @@
-//===--- NullabilityAnnotatorCheck.cpp - clang-tidy -----------------------===//
+HEADH//===--- NullabilityAnnotatorCheck.cpp - clang-tidy -----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -271,7 +271,13 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 }
 
 /// Determine the appropriate nullability for a method argument or function
+<<<<<<< HEAD
 /// parameter.
+=======
+/// parameter. ("Argument" and "parameter" in this comment block refer to the
+/// same thing: both mean "pointer arguments." Scalars are assumed to be
+/// irrelevant.)
+>>>>>>> a6959ee760d2 (Improve documentation in checker.)
 ///
 /// It can be tricky to get this right while avoiding false-determinations. Here
 /// are 4 ways *not* to do this:
@@ -331,15 +337,38 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 ///        to do this ourselves, because such checking is still useful in
 ///        Objective-C when the error is not enabled.
 ///
+<<<<<<< HEAD
 ///   2. Special case: An Objective-C reference pointer to `NSError` is
 ///      determined to be `NullabilityKind::Nullable`.
 ///   (https://developer.apple.com/swift/blog/?id=25)
+=======
+///   2. If an argument is checked for `nil` after some other behavior occurs,
+///      or if the `nil` branch is has side effects, then the argument can be
+///      determined to be `NullabilityKind::Nullable`.
+>>>>>>> a6959ee760d2 (Improve documentation in checker.)
 ///
 ///   3. If an argument is only passed to one or more methods or function, we
 ///      use the weakest nullability of the annotations in the declaration of
 ///      that method or function's matching argument.
 ///
+<<<<<<< HEAD
 ///
+=======
+///   4. Special case: An Objective-C reference pointer to `NSError` is
+///      determined to be `NullabilityKind::Nullable`.
+///      (https://developer.apple.com/swift/blog/?id=25)
+///
+///  5. Other reference pointer arguments ("inout" in some languages) that are
+///     dereferenced within the method or function body are
+///     `NullabilityKind::NonNull` because null dereferencing is an
+///     undefinedbehavior in C-family languages.
+///
+///   6.
+///
+///   After we test this on production code, it would be useful to re-evaluate
+///   to determine if there should be a defauld based on Doug Gregor's post on
+///   LLVM forums, which notes that most pointers are in fact nonnull.
+>>>>>>> a6959ee760d2 (Improve documentation in checker.)
 std::optional<NullabilityKind> getNullabilityForParmVarDecl(ParmVarDecl *PVD) {
   return std::nullopt;
 }
