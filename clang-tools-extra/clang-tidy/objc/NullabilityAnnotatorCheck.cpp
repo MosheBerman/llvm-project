@@ -390,6 +390,7 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 ///   to determine if there should be a default based on Doug Gregor's post on
 ///   LLVM forums, which notes that most pointers are in fact nonnull.
 std::optional<NullabilityKind> getNullabilityForParmVarDecl(ParmVarDecl *PVD) {
+  llvm::outs() << "ParmVarDecl: " << PVD->getQualifiedNameAsString() << "\n";
   return std::nullopt;
 }
 
