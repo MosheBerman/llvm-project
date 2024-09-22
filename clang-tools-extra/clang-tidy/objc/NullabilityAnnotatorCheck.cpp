@@ -39,6 +39,9 @@ using namespace clang::ast_matchers;
 
 namespace clang::tidy::objc {
 
+/// Skip cleanups and casts.
+///
+/// This is sort of sloppy, needs to be cleaned up.
 const Expr *getInnermostExpr(Expr *Exp) {
   const clang::Expr *E = Exp;
   E = E->IgnoreCasts()->IgnoreImpCasts();
@@ -312,12 +315,13 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 ///    `NullabilityKind::Nullable`
 ///    and consider our job done. The outcome of this approach is that
 ///    Swift consumers of our API continue to unwrap all of our newly
-///    annotated API. We can do better.
+///    annotated API. Internally, methods/functions must now check for null
+///    values. We can do better.
 ///
-///   Unfortunately, it's trickier than return statements to prove the intent of
-///   a method or function. We can, however, logically prove certain cases.
-///   Let's incorporate the above to annotate arguments and parameters as
-///   follows:
+///   Unfortunately, it's trickier than to prove the intent of a method or
+///   function with arguments than it is to understand return statements. We
+///   can, however, logically prove certain cases. Let's incorporate the above
+///   to annotate arguments and parameters as follows:
 ///
 ///   1. When an argument fulfills the following three criteria, it can be
 ///      reliably annotated as `NullabilityKind::NonNull`.
@@ -366,10 +370,11 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 ///   6.
 ///
 ///   After we test this on production code, it would be useful to re-evaluate
-///   to determine if there should be a defauld based on Doug Gregor's post on
+///   to determine if there should be a default based on Doug Gregor's post on
 ///   LLVM forums, which notes that most pointers are in fact nonnull.
 >>>>>>> a6959ee760d2 (Improve documentation in checker.)
 std::optional<NullabilityKind> getNullabilityForParmVarDecl(ParmVarDecl *PVD) {
+  llvm::outs() << "ParmVarDecl: " << PVD->getQualifiedNameAsString() << "\n";
   return std::nullopt;
 }
 
