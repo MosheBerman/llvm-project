@@ -1,4 +1,4 @@
-HEADH//===--- NullabilityAnnotatorCheck.cpp - clang-tidy -----------------------===//
+//===--- NullabilityAnnotatorCheck.cpp - clang-tidy -----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -39,6 +39,9 @@ using namespace clang::ast_matchers;
 
 namespace clang::tidy::objc {
 
+/// Skip cleanups and casts.
+///
+/// This is sort of sloppy, needs to be cleaned up.
 const Expr *getInnermostExpr(Expr *Exp) {
   const clang::Expr *E = Exp;
   E = E->IgnoreCasts()->IgnoreImpCasts();
@@ -83,6 +86,8 @@ public:
   std::vector<ReturnStmt *> getVisited() { return this->Visited; }
 };
 
+// MAEK: - Matchers
+
 void NullabilityAnnotatorCheck::registerMatchers(MatchFinder *Finder) {
   // Method decls
   Finder->addMatcher(
@@ -106,11 +111,24 @@ void NullabilityAnnotatorCheck::registerMatchers(MatchFinder *Finder) {
                                  hasAncestor(objcMethodDecl())))))
           .bind("vd"),
       this);
+  Finder->addMatcher(
+      varDecl(allOf(hasGlobalStorage(),
+                    unless(anyOf(hasAncestor(functionDecl()),
+                                 hasAncestor(objcMethodDecl())))))
+          .bind("vd"),
+      this);
 
   // Global variables
   // Finder->addMatcher(.bind("gvd"), this);
 }
 
+///  Determine if an expression represents either a `nil` literal, a `nullptr`,
+///  or a zero literal.
+///
+/// - parameter E: The expression to check.
+/// - parameter C: The AST context.
+/// - returns: `true` if the expression is some form of `nil`, `nullptr`, or
+/// zero
 bool isSomeKindOfNil(const Expr *E, ASTContext *C) {
   if (!E) {
     return false;
@@ -132,6 +150,20 @@ bool isSomeKindOfNil(const Expr *E, ASTContext *C) {
 }
 
 /// Determine if a return statement's value is `nil`, nullable, or a nonnull
+/// value, using the following logic for literals:
+///       a. A non-null literal value evaluates to `NullabilityKind::NonNull`
+///       b. A `nullptr`, `nil`, `NULL` or C-style cast to zero all evaluate to
+///          `NullabilityKind::Nullable`.
+///
+///     We consider calls to other methods, functions, and returns of variables.
+///
+///       c. If the return value is a `CallExpr` or `ObjCMessageExpr`,
+///          we utilize the annotated return type of the function or method
+///          being called.
+///       d. If the return value is a `DeclRefExpr`, we utilize any annotation
+///          on declaration being referenced. (This accounts for returning
+///          arguments, variables declared locally to the function/method, and
+///          Obj-C instance variables.)
 /// value, using the following logic for literals:
 ///       a. A non-null literal value evaluates to `NullabilityKind::NonNull`
 ///       b. A `nullptr`, `nil`, `NULL` or C-style cast to zero all evaluate to
@@ -171,14 +203,14 @@ NullabilityKind getNullabilityOfReturnStmt(ReturnStmt *RS, ASTContext &Ctx) {
     return NullabilityKind::Nullable;
   }
 
-  // base case: return string literal
-  // TODO: We probably want to check for other literals, like `NSNumber`,
-  // ()`NSArray`, and `NSDictionary`. `@()`, `@[]` and `@{}`, respectively.)
-  // I'm not sure how to import or define these for testing yet.
-  if (isa<ObjCStringLiteral>(RV) || isa<ObjCStringLiteral>(RVIgnoringCasts)) {
+  // base case: string, array, or dictionary literals
+  // TODO: We may wish to handle other boxed literals.
+  if (isa<ObjCStringLiteral>(RV) || isa<ObjCStringLiteral>(RVIgnoringCasts) ||
+      isa<ObjCArrayLiteral>(RV) || isa<ObjCArrayLiteral>(RVIgnoringCasts) ||
+      isa<ObjCDictionaryLiteral>(RV) ||
+      isa<ObjCDictionaryLiteral>(RVIgnoringCasts)) {
     return NullabilityKind::NonNull;
   }
-
   // If the return statement makes a call, check nullability of the call.
   ObjCMessageExpr *const OME =
       dyn_cast_or_null<ObjCMessageExpr>(RVIgnoringCasts);
@@ -219,10 +251,10 @@ NullabilityKind getNullabilityOfReturnStmt(ReturnStmt *RS, ASTContext &Ctx) {
   return NullabilityKind::Unspecified;
 }
 
-/// Given a `ReturnStatementCollector`, find the weakest nullability between all
-/// of the return statements that it has collected. These return statements may
-/// come from a single function, method, or multiple redclarations of the same
-/// one.
+/// Given a `ReturnStatementCollector`, find the weakest nullability between
+/// all of the return statements that it has collected. These return
+/// statements may come from a single function, method, or multiple
+/// redclarations of the same one.
 ///
 /// Assume "strongest" nullability, unless the are no return statements. We
 /// could have also assumed weakest and checked for "greater" nullability, but
@@ -245,11 +277,16 @@ std::optional<NullabilityKind> getWeakestNullabilityForReturnStatements(
   return NK;
 }
 
-// Find weakest nullability for a function prototype or method interface, by
-// considering all the return statements across all redecls. This addresses the
-// cases of ObjC protocols and functions prototypes, both with the possibility
-// of multiple implementations. We always follow the weakest nullability across
-// _all_ implementations.
+// MARK: - Weakest Nullability of a Function Prototype or Interface Method
+
+/// - note:By always adopting the weakest nullability across all
+/// implementations, we addresses the cases of ObjC protocols and functions
+/// prototypes, both with the possibility of multiple implementations.
+
+/// Collect all of the return statements for a canonical decl.
+///
+/// - parameter DeclOfType: The function or method decl to check.
+/// - returns: A vector of return statements for the canonical decl.
 template <typename T>
 std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
   ReturnStatementCollector Visitor;
@@ -258,7 +295,6 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
   bool IsCanonical = DeclOfType->isCanonicalDecl();
 
   if (!HasBody) {
-
     for (const auto R : DeclOfType->redecls()) {
       Visitor.TraverseDecl(R);
     }
@@ -271,51 +307,46 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 }
 
 /// Determine the appropriate nullability for a method argument or function
-<<<<<<< HEAD
-/// parameter.
-=======
 /// parameter. ("Argument" and "parameter" in this comment block refer to the
 /// same thing: both mean "pointer arguments." Scalars are assumed to be
 /// irrelevant.)
->>>>>>> a6959ee760d2 (Improve documentation in checker.)
 ///
-/// It can be tricky to get this right while avoiding false-determinations. Here
-/// are 4 ways *not* to do this:
-/// 1. It may be tempting to assume that the existance of an argument means it's
-///    there for a reason and choose `NullabilityKind::NonNull` as the correct
-///    annotation. This is not what we want because it's common to provide a
-///    fallback behavior or branch when the argument is `nil` in a particular
-///    call.
+/// It can be tricky to get this right while avoiding false-determinations.
+/// Here are 4 ways *not* to do this:
+/// 1. It may be tempting to assume that the existance of an argument means
+///    it's there for a reason and choose `NullabilityKind::NonNull` as the
+///    correct annotation. This is not what we want because it's common to
+///    provide a fallback behavior or branch when the argument is `nil` in
+///    a particular call.
 ///
-/// 2. Another naive approach would be to assume any annotation that is checked
-///    for `nil` should lead us to determine that `NullabilityKind::Nullable` is
-///    appropriate. This can be incorrect in cases where an `IfStmt` is at the
-///    top of the scope and the fallback behavior is to return early. This means
-///    that the function cannot execute as it otherwise would in the absence of
-///    a nonnull value. The correct determination would then be
-///    `NullabilityKind:Nonnull`. We can pay more attention to detail.
+/// 2. Another naive approach would be to assume any annotation that is
+///    checked for `nil` should lead us to determine that
+///    `NullabilityKind::Nullable` is appropriate. This can be incorrect in
+///    cases where an `IfStmt` is at the top of the scope and the fallback
+///    behavior is to return early. This means that the function cannot
+///    execute as it otherwise would in the absence of a nonnull value. The
+///    correct determination would then be `NullabilityKind:Nonnull`. We can pay
+///    more attention to detail.
 ///
 /// 3. When annotating manually, we might be tempted to examine callsites of a
 ///    particular method or function. In a sense, doing so removes one of the
 ///    key benefits of nullability annotations. That is, we are no longer
-///    setting expectations for callers of our API, and are effectively allowing
-///    them to dictate how our code should behave.
+///    setting expectations for callers of our API, and are effectively
+///    allowing them to dictate how our code should behave.
 ///
 /// 4. One lazy approach would be to mark arguments as
-///    `NullabilityKind::Unspecified`
-///    and consider our job done. This will inform developers that they have
-///    work to do, while silencing warnings from the "missing annotation"
-///    checker. There isn't much benefit to doing this because the checker
-///    exists. We can do better.
+///    `NullabilityKind::Unspecified` and consider our job done. This will
+///    inform developers that they have work to do, while silencing warnings
+///    from the "missing annotation" checker. There isn't much benefit to doing
+///    this because the checker exists. We can do better.
 ///
 /// 5. A marginally better approach would be to mark arguments as
-///    `NullabilityKind::Nullable`
-///    and consider our job done. The outcome of this approach is that
-///    Swift consumers of our API continue to unwrap all of our newly
-///    annotated API. We can do better.
+///    `NullabilityKind::Nullable` and consider our job done. The outcome of
+///    this approach is that Swift consumers of our API continue to unwrap all
+///    of our newly annotated API. We can do better.
 ///
-///   Unfortunately, it's trickier than return statements to prove the intent of
-///   a method or function. We can, however, logically prove certain cases.
+///   Unfortunately, it's trickier than return statements to prove the intent
+///   of a method or function. We can, however, logically prove certain cases.
 ///   Let's incorporate the above to annotate arguments and parameters as
 ///   follows:
 ///
@@ -323,37 +354,29 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 ///      reliably annotated as `NullabilityKind::NonNull`.
 ///      a. It is checked for `nil` before it is otherwise read or
 ///         written to, *and*
-///     b. the `nil` branch does nothing other than exit
+///      b. the `nil` branch does nothing other than exit
 ///         early, *and*
-///     c. the check precedes any other behavior. This condition is necessary to
-///        avoid changing the behavior of the code. Although we may accurately
-///        determine that a function cannot meaningfully execute if we encounter
-///        an early exit, any behavior that occurs prior to the check would no
-///        longer execute in the event of a `nil` value at the callsite.
+///      c. the check precedes any other behavior. This condition is necessary
+///         to avoid changing the behavior of the code. Although we may
+///         accurately determine that a function cannot meaningfully execute if
+///         we encounter an early exit, any behavior that occurs prior to the
+///         check would no longer execute in the event of a `nil` value at the
+///         callsite.
 ///
-///        In this case, it is safe for the developer to delete the `IfStmt`
-///        which guards the annotation, assuming they've enabled the
-///        "null-passed-to-nonnull" compiler flag as an error. We might not want
-///        to do this ourselves, because such checking is still useful in
-///        Objective-C when the error is not enabled.
+///         In this case, it is safe for the developer to delete the `IfStmt`
+///         which guards the annotation, assuming they've enabled the
+///         "null-passed-to-nonnull" compiler flag as an error. We might not
+///         want to do this ourselves, because such checking is still useful in
+///         Objective-C when the error is not enabled.
 ///
-<<<<<<< HEAD
-///   2. Special case: An Objective-C reference pointer to `NSError` is
-///      determined to be `NullabilityKind::Nullable`.
-///   (https://developer.apple.com/swift/blog/?id=25)
-=======
 ///   2. If an argument is checked for `nil` after some other behavior occurs,
 ///      or if the `nil` branch is has side effects, then the argument can be
 ///      determined to be `NullabilityKind::Nullable`.
->>>>>>> a6959ee760d2 (Improve documentation in checker.)
 ///
 ///   3. If an argument is only passed to one or more methods or function, we
 ///      use the weakest nullability of the annotations in the declaration of
 ///      that method or function's matching argument.
 ///
-<<<<<<< HEAD
-///
-=======
 ///   4. Special case: An Objective-C reference pointer to `NSError` is
 ///      determined to be `NullabilityKind::Nullable`.
 ///      (https://developer.apple.com/swift/blog/?id=25)
@@ -363,12 +386,9 @@ std::vector<ReturnStmt *> returnStatementsForCanonicalDecl(T DeclOfType) {
 ///     `NullabilityKind::NonNull` because null dereferencing is an
 ///     undefinedbehavior in C-family languages.
 ///
-///   6.
-///
 ///   After we test this on production code, it would be useful to re-evaluate
-///   to determine if there should be a defauld based on Doug Gregor's post on
+///   to determine if there should be a default based on Doug Gregor's post on
 ///   LLVM forums, which notes that most pointers are in fact nonnull.
->>>>>>> a6959ee760d2 (Improve documentation in checker.)
 std::optional<NullabilityKind> getNullabilityForParmVarDecl(ParmVarDecl *PVD) {
   return std::nullopt;
 }
@@ -391,11 +411,13 @@ std::optional<NullabilityKind> getNullabilityForParmVarDecl(ParmVarDecl *PVD) {
 /// method.
 ///
 /// 1. First we match functions ands method decls.
-/// 2. When we find a canonical declaration, we gather all the return statements
-///   in its redeclarations. (For methods or functions without a prototype, like
-///   private Obj-C methods, we collect the return stmts from the canonical decl
-///   instead.)
-/// 3. Evaluate the nullability of each return statement by examining its return
+/// 2. When we find a canonical declaration, we gather all the return
+/// statements
+///   in its redeclarations. (For methods or functions without a prototype,
+///   like private Obj-C methods, we collect the return stmts from the
+///   canonical decl instead.)
+/// 3. Evaluate the nullability of each return statement by examining its
+/// return
 ///    value.
 /// 4. We find the weakest nullability value across all the return
 ///    statements, by comparing them with `clang::hasWeakerNullability`.
@@ -408,15 +430,19 @@ std::optional<NullabilityKind> getNullabilityForParmVarDecl(ParmVarDecl *PVD) {
 ///  check, because annotations are carried in their type definitions and
 ///  therefore canonical decls can conflict with redecls.
 ///
-///  (i.e. If a block is defined with a nonnull argument x, and a function takes
-///  the same block except that it marks x as nullable, we'll have a warning
-///  from the conflicting nullability checker.)
+///  (i.e. If a block is defined with a nonnull argument x, and a function
+///  takes the same block except that it marks x as nullable, we'll have a
+///  warning from the conflicting nullability checker.)
 ///
-///  If we omit the nullable annotation from the redecleration, we might get the
-///  behavior we want. If we omit the annotation from the canonical block decl,
-///  we can mark the redecl as nullable, but we get a warning about the
+///  If we omit the nullable annotation from the redecleration, we might get
+///  the behavior we want. If we omit the annotation from the canonical block
+///  decl, we can mark the redecl as nullable, but we get a warning about the
 ///  canonical block decl missing an annotation. This requires some thought on
 ///  my part.
+///
+/// IDEA: What if we generated two parallel types for blocks, one with the
+/// nullable annotation and one without? This would allow us to check for
+/// the appropriate one and avoid the conflict.
 ///  ---
 ///
 void NullabilityAnnotatorCheck::check(const MatchFinder::MatchResult &Result) {
